@@ -1,4 +1,4 @@
-# Controle-de-Estoque---ltima-vers-o
+# Controle-de-Estoque--Ultima-versao
 Sistema de gestão de estoque, com diversas funcionalidades de compra e venda de produtos e movimentações financeiras
 
 Novidades nesta versão:
