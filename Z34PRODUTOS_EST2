@@ -1,0 +1,1881 @@
+REPORT z34produtos_est2.
+
+INCLUDE <icon>.
+
+" Declaração das tabelas globais
+TABLES: z35produtos_est, z34recursos_fin.
+
+" Definição da estrutura para os campos de consulta desejados
+" Estruturas customizadas
+TYPES:
+  "Estrutura de produto
+  BEGIN OF ty_produto,
+    nome           TYPE z35produtos_est-nome,
+    quantidade     TYPE z35produtos_est-quantidade,
+    preco          TYPE z35produtos_est-preco,
+    custo          TYPE z35produtos_est-custo,
+    margem         TYPE p LENGTH 5 DECIMALS 2,
+    estoque_minimo TYPE z35produtos_est-est_min,
+    estoque_maximo TYPE z35produtos_est-est_max,
+    sinalizador    TYPE icon_d,
+  END OF ty_produto,
+
+  "Estrutura de item de compra
+  BEGIN OF ty_item_compra,
+    nome       TYPE z35produtos_est-nome,
+    quantidade TYPE z35produtos_est-quantidade,
+    preco      TYPE z35produtos_est-preco,
+    total_item TYPE p LENGTH 15 DECIMALS 2,
+  END OF ty_item_compra.
+
+" Declaração de variáveis globais
+DATA: gv_saldo   TYPE z34recursos_fin-saldo, "Saldo disponível
+      gv_ucomm   TYPE sy-ucomm,
+      gv_custo   TYPE p LENGTH 15 DECIMALS 2, "Custo total da compra "Usado na nos botões e no form
+      gv_receita TYPE p LENGTH 15 DECIMALS 2. "Lucro total da venda  "Usado na nos botões e no form
+
+" Variável de controle = pedido de compra x pedido de venda
+DATA gv_tipo_operacao TYPE c LENGTH 1. "C para Compra ou V para Venda
+
+" Declaração de variáveis globais para tabela de carrinho de compras
+DATA: gt_carrinho TYPE TABLE OF ty_item_compra,
+      gs_carrinho TYPE ty_item_compra,
+      gv_total    TYPE p LENGTH 15 DECIMALS 2,
+      go_alv_carr TYPE REF TO cl_gui_alv_grid, "referência global do ALV do carriho de compras
+      go_popup    TYPE REF TO cl_gui_dialogbox_container. "referência global do popup
+
+" Declaração estruturada para os campos de consulta desejados
+" ALV
+DATA: go_container TYPE REF TO cl_gui_custom_container,
+      go_alv       TYPE REF TO cl_gui_alv_grid,
+      gt_produtos  TYPE TABLE OF ty_produto. "Estrutura customizada
+
+" Declaração dos objetos globais para manter referência
+DATA: "lo_popup    TYPE REF TO cl_gui_dialogbox_container, " Container do popup
+  "go_alv      TYPE REF TO cl_gui_alv_grid,            " Objeto ALV
+  gt_fieldcat TYPE lvc_t_fcat,                        " Field catalog (estrutura das colunas)
+  gs_fieldcat TYPE lvc_s_fcat.
+
+
+" Classe para permitir que a janela popup seja fechada
+* Classe para eventos de popup (close/fechar)
+CLASS lcl_event_handler DEFINITION.
+  PUBLIC SECTION.
+    METHODS: on_close FOR EVENT close OF cl_gui_dialogbox_container "fechar janela popup
+      IMPORTING sender.
+ENDCLASS.
+
+CLASS lcl_event_handler IMPLEMENTATION.
+  METHOD on_close.
+    " Limpa o carrinho de compras
+    CLEAR gt_carrinho.
+    "Zera o total
+    CLEAR gv_total.
+    CLEAR gs_carrinho.
+    " Fecha a popup liberando recursos
+    "CALL METHOD sender->free.
+    " Atualiza a GUI
+
+    IF sender IS BOUND.
+      sender->free( ). "Fecha o popup corretamente
+    ENDIF.
+    CLEAR go_popup.    "Limpa a referência global
+    CALL METHOD cl_gui_cfw=>flush.
+  ENDMETHOD.
+ENDCLASS.
+
+DATA go_handler TYPE REF TO lcl_event_handler. "escutador de eventos (clique duplo, fechar, botão existir, botão funcionar)
+"double_click, close, toolbar,        user_command
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON  21(20) bt_cad  USER-COMMAND cad.  " Cadastrar
+  SELECTION-SCREEN PUSHBUTTON  43(20) bt_ver  USER-COMMAND ver.  " Ver o estoque
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(20) bt_comp USER-COMMAND comp. " Comprar
+  SELECTION-SCREEN PUSHBUTTON 43(20) bt_vend USER-COMMAND vend. " Vender
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(20) bt_inv  USER-COMMAND inv.  " Investir
+  SELECTION-SCREEN PUSHBUTTON 43(20) bt_sac  USER-COMMAND sac.  " Sacar
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(20) bt_at_c USER-COMMAND at_c. " Atualizar custo
+  SELECTION-SCREEN PUSHBUTTON 43(20) bt_at_p USER-COMMAND at_p. " Atualizar preço
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(20) bt_lim  USER-COMMAND lim.  " Atualizar limites de estoque
+  SELECTION-SCREEN PUSHBUTTON 43(20) bt_p_ba USER-COMMAND p_ba. " Produtos em baixa
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(42) bt_p_co USER-COMMAND p_co. " Realizar pedido de compra
+SELECTION-SCREEN END OF LINE.
+
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON 21(42) bt_p_ve USER-COMMAND p_ve. " Realizar pedido de venda
+SELECTION-SCREEN END OF LINE.
+
+
+
+" Campos para interação
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+  PARAMETERS: v_saldo TYPE z34recursos_fin-saldo MODIF ID sal.
+  SELECTION-SCREEN SKIP.
+  PARAMETERS: p_prod TYPE z35produtos_est-nome,       " Nome do produto
+              p_qtd  TYPE z35produtos_est-quantidade, " Quantidade
+              p_cus  TYPE z35produtos_est-custo,      " Custo do produto
+              p_prec TYPE z35produtos_est-preco.      " Preço do produto
+  SELECTION-SCREEN SKIP.
+  PARAMETERS: p_e_min TYPE z35produtos_est-est_min,   " Estoque mínimo
+              p_e_max TYPE z35produtos_est-est_max.   " Estoque máximo
+  SELECTION-SCREEN SKIP.
+  PARAMETERS: p_inve TYPE p LENGTH 15 DECIMALS 2,    " Valor para investimento
+              p_sac  TYPE p LENGTH 15 DECIMALS 2.    " Valor para saque
+SELECTION-SCREEN END OF BLOCK b1.
+
+" Classe de Serviço:
+CLASS zcl_pedido_service DEFINITION.
+  PUBLIC SECTION.
+    METHODS:
+      confirmar_compra
+        IMPORTING it_carrinho TYPE STANDARD TABLE,
+      confirmar_venda
+        IMPORTING it_carrinho TYPE STANDARD TABLE.
+ENDCLASS.
+
+CLASS zcl_pedido_service IMPLEMENTATION.
+
+  METHOD confirmar_compra.
+
+    DATA: lv_saldo TYPE z34recursos_fin-saldo,
+          ls_item  TYPE ty_item_compra.
+
+    PERFORM obter_saldo.
+
+    IF gv_total > gv_saldo.
+      MESSAGE 'Saldo insuficiente.' TYPE 'E'.
+    ENDIF.
+
+    LOOP AT it_carrinho INTO ls_item.
+
+      UPDATE z35produtos_est
+        SET quantidade = quantidade + ls_item-quantidade
+        WHERE nome = ls_item-nome.
+
+    ENDLOOP.
+
+    gv_saldo = gv_saldo - gv_total.
+
+    UPDATE z34recursos_fin
+      SET saldo = gv_saldo
+      WHERE id_fin = 1.
+
+    COMMIT WORK.
+
+  ENDMETHOD.
+
+  METHOD confirmar_venda.
+
+    DATA: ls_item    TYPE ty_item_compra,
+          ls_produto TYPE z35produtos_est.
+
+    " Validação de estoque
+    LOOP AT it_carrinho INTO ls_item.
+
+      SELECT SINGLE *
+        INTO ls_produto
+        FROM z35produtos_est
+        WHERE nome = ls_item-nome.
+
+      IF ls_produto-quantidade < ls_item-quantidade.
+        MESSAGE |Estoque insuficiente para { ls_item-nome }| TYPE 'E'.
+      ENDIF.
+
+    ENDLOOP.
+
+    " Atualização de estoque (diminui)
+    LOOP AT it_carrinho INTO ls_item.
+
+      UPDATE z35produtos_est
+        SET quantidade = quantidade - ls_item-quantidade "estoque reduz a quantidade vendida
+        WHERE nome = ls_item-nome.
+
+    ENDLOOP.
+
+    "Aualização de saldo (aumenta)
+    PERFORM obter_saldo.
+
+    gv_saldo = gv_saldo + gv_total.
+
+    UPDATE z34recursos_fin
+      SET saldo = gv_saldo
+      WHERE id_fin = 1.
+
+    COMMIT WORK.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+" Classe para permitir eventos em janela popup de pedido de compra / eventos do ALV
+CLASS lcl_alv_event DEFINITION.
+  PUBLIC SECTION.
+    METHODS on_double_click FOR EVENT double_click OF cl_gui_alv_grid "para adicionar item de compra
+      IMPORTING e_row e_column.
+    METHODS on_data_changed "permite alterar quantidade no carrinho de compras
+      FOR EVENT data_changed OF cl_gui_alv_grid
+      IMPORTING er_data_changed.
+    METHODS on_data_changed_finished "recalcula total e título de janela após alteração do usuário no carrinho de compras
+        FOR EVENT data_changed_finished OF cl_gui_alv_grid.
+    METHODS on_toolbar "faz o botão de confirmar pedido de compra existir
+      FOR EVENT toolbar OF cl_gui_alv_grid
+      IMPORTING e_object e_interactive.
+    METHODS on_user_command "faz o botão de confirmar pedido de compra funcionar
+      FOR EVENT user_command OF cl_gui_alv_grid
+      IMPORTING e_ucomm.
+ENDCLASS.
+
+CLASS lcl_alv_event IMPLEMENTATION.
+
+  METHOD on_double_click. "-> Adicionar item de compra
+
+    DATA ls_produto TYPE ty_produto.
+
+    READ TABLE gt_produtos INTO ls_produto INDEX e_row-index.
+
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    CLEAR gs_carrinho.
+
+    "-----------------------------------------------------
+    " 1. Adiciona na tabela
+    "-----------------------------------------------------
+    gs_carrinho-nome = ls_produto-nome.
+    gs_carrinho-preco = ls_produto-preco.
+    gs_carrinho-quantidade = 1. "quantidade inicial padrão (editável)
+    "-----------------------------------------------------
+    " 2. Calcula o total
+    "-----------------------------------------------------
+    gs_carrinho-total_item = gs_carrinho-quantidade * gs_carrinho-preco.
+    "-----------------------------------------------------
+    " 3. Adiciona ao carrinho de compras
+    "-----------------------------------------------------
+    APPEND gs_carrinho TO gt_carrinho.
+    "-----------------------------------------------------
+    " 4. Recalcula total geral
+    "-----------------------------------------------------
+    PERFORM calcular_total.
+    "-----------------------------------------------------
+    " 5. Manda o ALV atualizar
+    "-----------------------------------------------------
+    IF go_alv_carr IS BOUND.
+      CALL METHOD go_alv_carr->refresh_table_display( ).
+    ENDIF.
+    "-----------------------------------------------------
+    " 6. Manda o caption atualizar (o título da janela popup)
+    "-----------------------------------------------------
+    PERFORM atualizar_caption_popup.
+    "-----------------------------------------------------
+    " 7. Mostra o total na tela
+    "-----------------------------------------------------
+    MESSAGE | Total atual: { gv_total }| TYPE 'S'.
+
+  ENDMETHOD.
+
+  METHOD on_data_changed. "-> permite alterar quantidade no carrinho de compras - e recalcula custo
+
+    DATA ls_mod  TYPE lvc_s_modi.
+    DATA ls_item TYPE ty_item_compra.
+
+    LOOP AT er_data_changed->mt_mod_cells INTO ls_mod.
+
+      "Pega a linha editada
+      READ TABLE gt_carrinho INTO ls_item INDEX ls_mod-row_id.
+
+      IF sy-subrc <> 0.
+        CONTINUE. " Pula para a próxima iteração do LOOP
+      ENDIF.
+
+      "Atualizar quantidade
+      IF ls_mod-fieldname = 'QUANTIDADE'.
+
+        ls_item-quantidade = ls_mod-value+0. "+0 porque value é tipo string, e +0 força a conversão numérica
+
+        "Recalcular o total do item
+        ls_item-total_item = ls_item-quantidade * ls_item-preco.
+
+        "Atualizar na tabela
+        MODIFY gt_carrinho
+        FROM ls_item
+        INDEX ls_mod-row_id.
+
+        "Atualizar o campo "Total" da tabela do carrinho de compras na ALV
+        CALL METHOD er_data_changed->modify_cell
+          EXPORTING
+            i_row_id    = ls_mod-row_id
+            i_fieldname = 'TOTAL_ITEM'
+            i_value     = ls_item-total_item.
+
+      ENDIF.
+
+    ENDLOOP.
+
+    "Recalcular total geral
+    PERFORM calcular_total.
+
+    "Força atualização visual limpa no campo "Total" da tabela do carrinho de compras na ALV
+    CALL METHOD cl_gui_cfw=>flush.
+
+    IF go_popup IS BOUND.
+      "Atualizar título
+      PERFORM atualizar_caption_popup.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD on_data_changed_finished. "-> recalcula total e título de janela após alteração do usuário no carrinho de compras
+
+    "Recalcular total geral
+    PERFORM calcular_total.
+
+    "Atualizar título
+    IF go_popup IS BOUND.
+      PERFORM atualizar_caption_popup.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD on_toolbar. "-> faz o botão de confirmar (o pedido de compra) existir
+
+    DATA ls_button TYPE stb_button.
+
+    CLEAR ls_button.
+
+    ls_button-function  = 'CONFIRM'.
+    IF gv_tipo_operacao = 'C'.
+      ls_button-text      = 'Confirmar pedido de compras'.
+      ls_button-quickinfo = 'Confirmar pedido de compras.'.
+    ELSEIF gv_tipo_operacao = 'V'.
+      ls_button-text      = 'Confirmar pedido de vendas'.
+      ls_button-quickinfo = 'Confirmar pedido de vendas.'.
+    ENDIF.
+    ls_button-icon      = icon_system_save.
+
+    APPEND ls_button TO e_object->mt_toolbar.
+
+  ENDMETHOD.
+
+  METHOD on_user_command. "-> faz o botão de confirmar (o pedido de compra/venda) funcionar
+
+    DATA lo_service TYPE REF TO zcl_pedido_service.
+
+    CREATE OBJECT lo_service.
+
+    CASE e_ucomm.
+
+      WHEN 'CONFIRM'.
+
+        IF gv_tipo_operacao = 'C'.
+          lo_service->confirmar_compra( gt_carrinho ).
+
+        ELSEIF gv_tipo_operacao = 'V'.
+          lo_service->confirmar_venda( gt_carrinho ).
+
+        ENDIF.
+
+        PERFORM atualizar_saldo_na_tela.
+
+        IF go_popup IS BOUND.            " se o popup existir
+          CALL METHOD go_popup->free.    " fecha a janela popup
+          CALL METHOD cl_gui_cfw=>flush. " atualiza a interface imediatamente
+        ENDIF.
+
+        LEAVE TO SCREEN sy-dynnr. " atualiza os campos (no caso, o do saldo) imediatamente
+
+    ENDCASE.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS zcl_alv_helper DEFINITION.
+  PUBLIC SECTION.
+    CLASS-METHODS adicionar_field_catalog
+      IMPORTING
+        p_field     TYPE lvc_fname
+        p_text      TYPE string
+        p_edit      TYPE abap_bool
+        p_outputlen TYPE i DEFAULT 15 "Só por causa do DEFAUL (tamanho padrão da largura da coluna) eu criei a tabela, e não o form
+      CHANGING
+        pt_fieldcat TYPE lvc_t_fcat.
+ENDCLASS.
+
+CLASS zcl_alv_helper IMPLEMENTATION.
+
+  METHOD adicionar_field_catalog.
+
+    DATA ls_fieldcat TYPE lvc_s_fcat.
+
+    CLEAR ls_fieldcat.
+
+    ls_fieldcat-fieldname = p_field.
+    ls_fieldcat-coltext   = p_text.
+    ls_fieldcat-edit      = p_edit.
+    ls_fieldcat-outputlen = p_outputlen.
+
+    APPEND ls_fieldcat TO pt_fieldcat.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+" Inicialização da tela
+
+"INITIALIZATION. -> lógica inicial
+
+AT SELECTION-SCREEN OUTPUT. "-> atualiza a tela
+  bt_cad  = 'Cadastrar Produto'.
+  bt_comp = 'Comprar Produto'.
+  bt_vend = 'Vender Produto'.
+  bt_inv  = 'Receber investimento'.
+  bt_ver  = 'Ver o estoque'.
+  bt_sac  = 'Sacar o lucro'.
+  bt_at_c = 'Atualizar o custo'.
+  bt_at_p = 'Atualizar o preço'.
+  bt_lim  = 'Atualizar limites'.
+  bt_p_ba = 'Produtos em baixa'.
+  bt_p_co = 'Realizar pedido de compras'.
+  bt_p_ve = 'Realizar pedido de vendas'.
+
+  PERFORM atualizar_saldo_na_tela. "Carrega saldo inicial
+
+  LOOP AT SCREEN.
+    IF screen-name = 'V-SALDO'.
+      screen-input = 0. "bloqueia edição
+      MODIFY SCREEN.
+    ENDIF.
+  ENDLOOP.
+
+  "Captura qual botão foi pressionado
+
+AT SELECTION-SCREEN.
+  gv_ucomm = sy-ucomm.
+
+  CASE gv_ucomm.
+    WHEN 'CAD'.
+      PERFORM cadastrar_produto.
+    WHEN 'COMP'.
+      PERFORM comprar_produto.
+    WHEN 'VEND'.
+      PERFORM vender_produto.
+    WHEN 'INV'.
+      PERFORM receber_investimento.
+    WHEN 'VER'.
+      PERFORM ver_estoque_popup.
+    WHEN 'SAC'.
+      PERFORM sacar_lucro.
+    WHEN 'AT_C'.
+      PERFORM atualizar_custo.
+    WHEN 'AT_P'.
+      PERFORM atualizar_preco.
+    WHEN 'LIM'.
+      PERFORM atualizar_limites.
+    WHEN 'P_BA'.
+      PERFORM produtos_em_baixa.
+    WHEN 'P_CO'.
+      PERFORM pedido_compra.
+    WHEN 'P_VE'.
+      PERFORM pedido_venda.
+  ENDCASE.
+
+  " FORMS:
+
+FORM cadastrar_produto.
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod  IS INITIAL OR
+     p_qtd   IS INITIAL OR
+     p_cus   IS INITIAL OR
+     p_prec  IS INITIAL OR
+     p_e_min IS INITIAL OR
+     p_e_max IS INITIAL.
+    MESSAGE 'Informe nome, quantidade, custo e preço e limites de estoque do produto para cadastrar' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Regra de negócio: não permitir venda com prejuízo
+  "-----------------------------------------------------
+  IF p_cus >= p_prec.
+    MESSAGE 'O preço deve ser maior que o custo do produto.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 3. Gerar ID automático
+  "-----------------------------------------------------
+  " Forma antiga e com possível bug no caso de uso simultâneo de 2 ou mais usuários:
+*  DATA lv_id TYPE i.
+*  SELECT MAX( id_produto ) INTO @lv_id FROM z34produtos_est.
+*    lv_id = lv_id + 1.
+
+  " Forma melhorada padrão SAP: (Fonte: Copilot + https://youtu.be/SmreMbaPAX4?si=9zLqsh7yVYiGr0Js )
+  DATA lv_id TYPE z35produtos_est-id_produto.
+  CALL FUNCTION 'NUMBER_GET_NEXT'
+    EXPORTING
+      nr_range_nr             = '01'
+      object                  = 'Z35PROD_ID' "Nome do objeto de intervalo que criei na SNRO
+    IMPORTING
+      number                  = lv_id
+    EXCEPTIONS
+      interval_not_found      = 1
+      number_range_not_intern = 2
+      object_not_found        = 3
+      quantity_is_0           = 4
+      quantity_is_not_1       = 5
+      interval_overflow       = 6
+      suffer_overflow         = 7
+      OTHERS                  = 8.
+
+  IF sy-subrc = 0.
+    MESSAGE |Número gerado: { lV_id }| TYPE 'S'.
+  ELSE.
+    MESSAGE |Erro ao gerar o número ( { sy-subrc } )| TYPE 'S' DISPLAY LIKE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 4. Cadastar os dados
+  "-----------------------------------------------------
+  " Inserir produto
+  z35produtos_est-id_produto = lv_id.
+  z35produtos_est-nome       = p_prod.
+  z35produtos_est-quantidade = p_qtd.
+  z35produtos_est-custo      = p_cus.
+  z35produtos_est-preco      = p_prec.
+  z35produtos_est-est_min    = p_e_min.
+  z35produtos_est-est_max    = p_e_max.
+
+  "-----------------------------------------------------
+  " 5. Gravar no banco
+  "-----------------------------------------------------
+  INSERT z35produtos_est.
+  LEAVE TO LIST-PROCESSING.
+  "-----------------------------------------------------
+  " 6. Verificar se deu certo a gravação no banco
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao cadastrar o produto.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac, p_e_min, p_e_max.
+  MESSAGE 'O produto foi cadastrado com sucesso!' TYPE 'S'.
+
+ENDFORM.
+
+FORM obter_saldo.
+  "-----------------------------------------------------
+  " 1. Buscar o saldo atual no banco
+  "-----------------------------------------------------
+  SELECT SINGLE saldo
+    INTO gv_saldo
+  FROM z34recursos_fin
+  WHERE id_fin = 1.
+
+  "-----------------------------------------------------
+  " 2. Verificar se encontrou o registro
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    MESSAGE 'Erro ao obter o saldo financeiro' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+FORM comprar_produto.
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod IS INITIAL.
+    MESSAGE 'Informe o nome do produto' TYPE 'E'.
+  ENDIF.
+  IF p_qtd IS INITIAL.
+    MESSAGE 'Informe quantidade de produtos que deseja comprar' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 2. Declaração de variáveis locais
+  "-----------------------------------------------------
+  DATA: ls_produto TYPE z35produtos_est,
+        lv_custo   TYPE p LENGTH 15 DECIMALS 2.
+
+  "-----------------------------------------------------
+  " 3. Buscar o produto no banco
+  "-----------------------------------------------------
+  SELECT  SINGLE *
+    INTO ls_produto
+  FROM z35produtos_est
+  WHERE nome = p_prod.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Esse produto não foi cadastrado' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Calcular o custo total
+  "-----------------------------------------------------
+  lv_custo = p_qtd * ls_produto-custo.
+
+  "-----------------------------------------------------
+  " 5. Verificar se o saldo é suficiente para a compra
+  "-----------------------------------------------------
+  PERFORM obter_saldo.
+
+  IF lv_custo > gv_saldo.
+    MESSAGE 'Saldo insuficiente' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 6. Atualizar os dados
+  "-----------------------------------------------------
+  ls_produto-quantidade = ls_produto-quantidade + p_qtd.
+  gv_saldo = gv_saldo - lv_custo.
+
+  "-----------------------------------------------------
+  " 7. Atualizar o banco de dados
+  "-----------------------------------------------------
+  UPDATE z35produtos_est
+  SET quantidade = @ls_produto-quantidade
+  WHERE id_produto = @ls_produto-id_produto.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o estoque.' TYPE 'E'.
+  ENDIF.
+
+  UPDATE z34recursos_fin
+  SET saldo = @gv_saldo
+  WHERE id_fin = 1.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o saldo.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 8. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  PERFORM atualizar_saldo_na_tela.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+  MESSAGE 'Venda realizada com sucesso!' TYPE 'S'.
+
+ENDFORM.
+
+FORM vender_produto.
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod IS INITIAL.
+    MESSAGE 'Informe o nome do produto' TYPE 'E'.
+  ENDIF.
+  IF p_qtd IS INITIAL.
+    MESSAGE 'Informe quantidade de produtos que deseja vender' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Declaração de variáveis locais
+  "-----------------------------------------------------
+  DATA: ls_produto TYPE z35produtos_est,
+        lv_lucro   TYPE p LENGTH 15 DECIMALS 2.
+
+  "-----------------------------------------------------
+  " 3. Buscar o produto no banco
+  "-----------------------------------------------------
+  SELECT SINGLE *
+    INTO ls_produto
+  FROM z35produtos_est
+  WHERE nome = p_prod.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Esse produto não foi cadastrado' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Verificar se há estoque suficiente
+  "-----------------------------------------------------
+  IF ls_produto-quantidade < p_qtd.
+    MESSAGE 'Estoque insuficiente' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 5. Calcular o lucro bruto
+  "-----------------------------------------------------
+  lv_lucro = p_qtd * ls_produto-preco.
+
+  "-----------------------------------------------------
+  " 6. Obter o saldo atual
+  "-----------------------------------------------------
+  PERFORM obter_saldo.
+
+  "-----------------------------------------------------
+  " 7. Atualizar os dados
+  "-----------------------------------------------------
+  ls_produto-quantidade = ls_produto-quantidade - p_qtd.
+  gv_saldo = gv_saldo + lv_lucro.
+
+  "-----------------------------------------------------
+  " 8. Atualizar o banco de dados
+  "-----------------------------------------------------
+  UPDATE z35produtos_est
+  SET quantidade = @ls_produto-quantidade
+  WHERE id_produto = @ls_produto-id_produto.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o estoque.' TYPE 'E'.
+  ENDIF.
+
+  UPDATE z34recursos_fin
+  SET saldo = @gv_saldo
+  WHERE id_fin = 1.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o saldo.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 9. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  PERFORM atualizar_saldo_na_tela.
+  CLEAR:p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+  MESSAGE 'Venda realizada com sucesso!' TYPE 'S'.
+
+ENDFORM.
+
+FORM receber_investimento.
+  "1. Somar p_valor ao saldo atual
+  "2. Confirmar o recebimento do investimento com uma mensagem
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_inve IS INITIAL.
+    MESSAGE 'Informe o valor do investimento antes de continuar.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 2. Declaração da variável local
+  "-----------------------------------------------------
+  DATA lv_saldo_atual TYPE z34recursos_fin-saldo.
+
+  "-----------------------------------------------------
+  " 3. Ler o saldo atual do banco
+  "-----------------------------------------------------
+  SELECT SINGLE saldo INTO gv_saldo FROM z34recursos_fin WHERE id_fin = 1.
+
+  "-----------------------------------------------------
+  " 4. Somar o investimento ao saldo atual
+  "-----------------------------------------------------
+  gv_saldo = gv_saldo + p_inve.
+
+  "-----------------------------------------------------
+  " 5. Somar o investimento ao saldo atual
+  "-----------------------------------------------------
+  UPDATE z34recursos_fin SET saldo = gv_saldo WHERE id_fin = 1.
+
+  "-----------------------------------------------------
+  " 6. Verificar se a gravação deu certo no banco
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro no recebimento do investimento.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  PERFORM atualizar_saldo_na_tela.
+  MESSAGE: 'Investimento recebido com sucesso.' TYPE 'S'.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+
+ENDFORM.
+
+FORM atualizar_saldo_na_tela.
+  "-----------------------------------------------------
+  " 1. Buscar o saldo no banco
+  "-----------------------------------------------------
+  SELECT SINGLE saldo INTO gv_saldo
+  FROM z34recursos_fin
+  WHERE id_fin = 1.
+  "-----------------------------------------------------
+  " 2. Atualizar o valor do saldo na tela
+  "-----------------------------------------------------
+  v_saldo = gv_saldo.
+ENDFORM.
+
+FORM ver_estoque_popup.
+  "-----------------------------------------------------
+  " 1. Criar popup (janela modal)
+  "-----------------------------------------------------
+  PERFORM criar_popup.
+
+  "-----------------------------------------------------
+  " 2. Para poder fechar o popup ao clicar no X
+  "-----------------------------------------------------
+  IF go_handler IS NOT BOUND.
+    CREATE OBJECT go_handler.
+  ENDIF.
+  SET HANDLER go_handler->on_close FOR go_popup.
+
+  "-----------------------------------------------------
+  " 3. Para criar ALV dentro do popup
+  "-----------------------------------------------------
+  CREATE OBJECT go_alv
+    EXPORTING
+      i_parent = go_popup. " Define que o ALV será exibido dentro do popup
+
+  DATA ls_produto TYPE ty_produto.
+
+  CLEAR gt_produtos.
+
+  SELECT nome, quantidade, preco, custo, est_min AS estoque_minimo, est_max AS estoque_maximo
+  INTO CORRESPONDING FIELDS OF TABLE @gt_produtos
+  FROM z35produtos_est.
+
+  FIELD-SYMBOLS: <fs_produto> TYPE ty_produto.
+
+  LOOP AT gt_produtos ASSIGNING <fs_produto>.
+    "-----------------------------------------------------
+    " 4. Calcular a margem de lucro:
+    "-----------------------------------------------------
+
+    " Evitar divisão por 0
+    IF <fs_produto>-preco > 0.
+      <fs_produto>-margem = ( ( <fs_produto>-preco - <fs_produto>-custo ) / <fs_produto>-preco ) * 100.
+    ELSE.
+      <fs_produto>-margem = 0.
+    ENDIF.
+
+    " Calcular o sinalizador de estoque:
+    IF <fs_produto>-quantidade < <fs_produto>-estoque_minimo.
+      <fs_produto>-sinalizador = icon_red_light.
+    ELSEIF <fs_produto>-quantidade <= <fs_produto>-estoque_maximo.
+      <fs_produto>-sinalizador = icon_yellow_light.
+    ELSE.
+      <fs_produto>-sinalizador = icon_green_light.
+    ENDIF.
+
+  ENDLOOP.
+
+  "-----------------------------------------------------
+  " 5. Montar manualmente o Field Catalog
+  "-----------------------------------------------------
+
+  " Como usamos uma estrutura local (ty_produto), o ALV não consegue gerar automaticamente
+  CLEAR gt_fieldcat.
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text = 'Produto'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'QUANTIDADE'
+      p_text = 'Estoque atual'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text = 'Preço'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'CUSTO'
+      p_text = 'Custo'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'MARGEM'
+      p_text = 'Margem de lucro (%)'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'ESTOQUE_MINIMO'
+      p_text = 'Estoque mínimo'
+      p_edit = space
+      p_outputlen = 20
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'ESTOQUE_MAXIMO'
+      p_text = 'Estoque máximo'
+      p_edit = space
+      p_outputlen = 20
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'SINALIZADOR'
+      p_text = 'Sinalizador'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = gt_fieldcat ).
+
+  "-----------------------------------------------------
+  " 6. Exibir ALV com os dados e o field catalog
+  "-----------------------------------------------------
+  CALL METHOD go_alv->set_table_for_first_display
+    EXPORTING
+      i_structure_name = '' " Vazio porque usamos estrutura local
+    CHANGING
+      it_outtab        = gt_produtos  " Dados a serem exibidos
+      it_fieldcatalog  = gt_fieldcat. " Estrutura das colunas
+
+ENDFORM.
+
+FORM sacar_lucro.
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_sac IS INITIAL.
+    MESSAGE 'Informe o valor do saque antes de continuar.' TYPE 'E'.
+  ELSEIF p_sac > v_saldo.
+    MESSAGE 'Saldo insuficiente para o saque no valor desejado.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Declaração de variável local
+  "-----------------------------------------------------
+  DATA lv_saldo_atual TYPE z34recursos_fin-saldo.
+
+  "-----------------------------------------------------
+  " 3. Ler o saldo atual do banco
+  "-----------------------------------------------------
+  SELECT SINGLE saldo INTO gv_saldo FROM z34recursos_fin WHERE id_fin = 1.
+
+  "-----------------------------------------------------
+  " 4. Subtrair o saque ao saldo atual
+  "-----------------------------------------------------
+  gv_saldo = gv_saldo - p_sac.
+
+  "-----------------------------------------------------
+  " 5. Atualizar o banco de dados
+  "-----------------------------------------------------
+  UPDATE z34recursos_fin SET saldo = gv_saldo WHERE id_fin = 1.
+
+  "-----------------------------------------------------
+  " 6. Verificar se a gravação no banco deu certo
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao sacar o lucro.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  PERFORM atualizar_saldo_na_tela.
+  MESSAGE: 'Saque realizado com sucesso.' TYPE 'S'.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+
+ENDFORM.
+
+FORM atualizar_custo.
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod IS INITIAL.
+    MESSAGE 'Informe o nome do produto antes de continuar.' TYPE 'E'.
+  ENDIF.
+  IF p_cus IS INITIAL.
+    MESSAGE 'Informe o novo custo para atualizar.' TYPE 'E'.
+  ENDIF.
+  IF p_cus <= 0.
+    MESSAGE 'O custo não pode ser negativo nem zerado.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Declaração de variável local
+  "-----------------------------------------------------
+  DATA ls_produto TYPE z35produtos_est.
+
+  "-----------------------------------------------------
+  " 3. Ver se o produto está cadastrado no banco de dados
+  "-----------------------------------------------------
+  SELECT SINGLE *
+    INTO ls_produto
+  FROM z35produtos_est
+  WHERE nome = p_prod.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Confirma todas as alterações na base de dados
+    MESSAGE 'Esse produto não foi cadastrado.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Regra de negócio: custo menor que preço
+  "-----------------------------------------------------
+  IF p_cus >= ls_produto-preco.
+    MESSAGE 'O custo não pode ser maior ou igual ao preço. Atualize o preço primeiro.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 5. Atualizar o banco de dados
+  "-----------------------------------------------------
+  UPDATE z35produtos_est
+  SET custo = @ls_produto-custo
+  WHERE id_produto = @ls_produto-id_produto.
+
+  "-----------------------------------------------------
+  " 6. Verificar se a gravação no banco deu certo
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o custo.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  MESSAGE: 'Custo atualizado com sucesso!' TYPE 'S'.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+
+ENDFORM.
+
+FORM atualizar_preco.
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod IS INITIAL.
+    MESSAGE 'Informe o nome do produto antes de continuar.' TYPE 'E'.
+  ENDIF.
+  IF p_prec IS INITIAL.
+    MESSAGE 'Informe o novo custo para atualizar.' TYPE 'E'.
+  ENDIF.
+  IF p_prec <= 0.
+    MESSAGE 'O preço não pode ser negativo nem zerado.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Declaração da variável local
+  "-----------------------------------------------------
+  DATA ls_produto TYPE z35produtos_est.
+
+  "-----------------------------------------------------
+  " 3. Ver se o produto está cadastrado no banco de dados
+  "-----------------------------------------------------
+  SELECT SINGLE *
+    INTO ls_produto
+  FROM z35produtos_est
+  WHERE nome = p_prod.
+
+  IF sy-subrc <> 0.
+    MESSAGE 'Esse produto não foi cadastrado.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Regra de negócio: não permitir venda com prejuízo
+  "-----------------------------------------------------
+  IF p_prec <= ls_produto-custo.
+    MESSAGE 'O preço deve ser maior que o custo do produto.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 5. Atualizar o banco de dados
+  "-----------------------------------------------------
+  UPDATE z35produtos_est
+  SET preco = @ls_produto-preco
+  WHERE id_produto = @ls_produto-id_produto.
+
+  "-----------------------------------------------------
+  " 6. Verificar se a gravação no banco deu certo
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Cancela todas as instruções OpenSQL que modificam dados
+    MESSAGE 'Erro ao atualizar o preço.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  MESSAGE: 'Preço atualizado com sucesso!' TYPE 'S'.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac.
+
+ENDFORM.
+
+FORM atualizar_limites.
+
+  "-----------------------------------------------------
+  " 1. Verificar preenchimento de campos obrigatórios
+  "-----------------------------------------------------
+  IF p_prod IS INITIAL.
+    MESSAGE 'Informe o nome do produto antes de continuar.' TYPE 'E'.
+  ENDIF.
+
+  IF p_e_min IS INITIAL AND p_e_max IS INITIAL.
+    MESSAGE 'Informe o novo limite mínimo ou máximo de estoque para atualizar.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 2. Declaração de variável local
+  "-----------------------------------------------------
+  DATA ls_produto TYPE z35produtos_est.
+
+  "-----------------------------------------------------
+  " 3. Ver se o produto está cadastrado no banco de dados
+  "-----------------------------------------------------
+  SELECT SINGLE *
+    INTO ls_produto
+  FROM z35produtos_est
+  WHERE nome = p_prod.
+
+  IF sy-subrc <> 0.
+    ROLLBACK WORK. " Confirma todas as alterações na base de dados
+    MESSAGE 'Esse produto não foi cadastrado.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Regra de negócio: limite máximo maior que limite mínimo
+  "-----------------------------------------------------
+  IF p_e_min IS NOT INITIAL AND p_e_max IS NOT INITIAL AND p_e_min >= p_e_max.
+    MESSAGE 'O limite mínimo deve ser menor que o limite máximo.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 5. Regra de negócio: limite mínimo >= 1
+  "-----------------------------------------------------
+  IF p_e_min IS NOT INITIAL AND p_e_min < 1.
+    MESSAGE 'O limite mínimo ´não pode ser zerado nem negativo.' TYPE 'E'.
+  ENDIF.
+  "-----------------------------------------------------
+  " 6. Atualizar o banco de dados
+  "-----------------------------------------------------
+
+  DATA ls_set TYPE string. "ls_set guarda o comando SQL que será montado dinamicamente
+
+  " Verificar se o campo do estoque mínimo foi preenchido
+  IF p_e_min IS NOT INITIAL.
+    ls_set = |est_min = { p_e_min }|.
+  ENDIF.
+
+  " Verificar se o campo do estoque máximo foi preenchido
+  IF p_e_max IS NOT INITIAL.
+    IF ls_set IS INITIAL.
+      ls_set = |est_max = { p_e_max }|.
+    ELSE.
+      ls_set = |{ ls_set }, est_max = { p_e_max }|.
+    ENDIF.
+  ENDIF.
+
+  IF ls_set IS NOT INITIAL.
+    UPDATE z35produtos_est
+    SET (ls_set) "ls = est_min = x se est_min IS NOT INITIAL e/ou est_max = y se est_max IS NOT INITIAL
+    WHERE id_produto = @ls_produto-id_produto.
+
+    "-----------------------------------------------------
+    " 6. Verificar se a gravação no banco deu certo
+    "-----------------------------------------------------
+    IF sy-subrc <> 0.
+      ROLLBACK WORK.
+      MESSAGE 'Erro ao atualizar o(s) limite(s) de estoque.' TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 7. Feedback ao usuário
+  "-----------------------------------------------------
+  COMMIT WORK. " Confirma todas as alterações na base de dados
+  MESSAGE: 'Limite(s) de estoque atualizado(s) com sucesso!' TYPE 'S'.
+  CLEAR: p_prod, p_qtd, p_cus, p_prec, p_inve, p_sac, p_e_min, p_e_max.
+
+ENDFORM.
+
+FORM produtos_em_baixa.
+  "-----------------------------------------------------
+  " 1. Declaração dos objetos globais para manter referência
+  "-----------------------------------------------------
+  DATA: "lo_popup    TYPE REF TO cl_gui_dialogbox_container, " Container do popup
+    lo_alv      TYPE REF TO cl_gui_alv_grid,            " Objeto ALV
+    lt_fieldcat TYPE lvc_t_fcat.                        " Field catalog (estrutura das colunas)
+
+  "-----------------------------------------------------
+  " 2. Criar popup (janela modal)
+  "-----------------------------------------------------
+  PERFORM criar_popup.
+
+  "-----------------------------------------------------
+  " 3. Criar handler e registrar eventos CLOSE
+  "-----------------------------------------------------
+  IF go_handler IS NOT BOUND.
+    CREATE OBJECT go_handler.
+  ENDIF.
+  SET HANDLER go_handler->on_close FOR go_popup.
+
+  "-----------------------------------------------------
+  " 4. Criar ALV dentro do popup
+  "-----------------------------------------------------
+  CREATE OBJECT lo_alv
+    EXPORTING
+      i_parent = go_popup. " Define que o ALV será exibido dentro do popup
+
+  "-----------------------------------------------------
+  " 5. Buscar dados do estoque
+  "-----------------------------------------------------
+  CLEAR gt_produtos.
+
+  SELECT
+    nome,
+    quantidade,
+    preco,
+    custo,
+    est_min AS estoque_minimo,
+    est_max AS estoque_maximo
+    INTO CORRESPONDING FIELDS OF TABLE @gt_produtos
+    FROM z35produtos_est AS z
+    WHERE z~quantidade < z~est_min
+    ORDER BY quantidade ASCENDING.
+
+  "-----------------------------------------------------
+  " 6. Montar o Field Catalog aproveitando o helper
+  "-----------------------------------------------------
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text = 'Produto'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'QUANTIDADE'
+      p_text = 'Estoque atual'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text = 'Preço'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'CUSTO'
+      p_text = 'Custo'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'ESTOQUE_MINIMO'
+      p_text = 'Estoque mínimo'
+      p_edit = space
+      p_outputlen = 20
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'ESTOQUE_MAXIMO'
+      p_text = 'Estoque máximo'
+      p_edit = space
+      p_outputlen = 20
+    CHANGING
+      pt_fieldcat = lt_fieldcat ).
+
+  "-----------------------------------------------------
+  " 7. Exibir ALV com os dados
+  "-----------------------------------------------------
+  PERFORM exibir_alv USING lo_alv gt_produtos lt_fieldcat.
+
+ENDFORM.
+
+FORM incluir_produto.
+
+  "-----------------------------------------------------
+  " 1. Declaração da variável local: uma estrutura que representa 1 linha da tabela interna gt_produtos
+  "-----------------------------------------------------
+  DATA: ls_produto TYPE ty_produto.
+
+  "-----------------------------------------------------
+  " 2. Ler 1 produto da tabela interna (lista de produtos do fornecedor)
+  "-----------------------------------------------------
+  READ TABLE gt_produtos INTO ls_produto INDEX 1. " Pega o 1° produto da tabela e coloca em ls_produto
+
+  "-----------------------------------------------------
+  " 3. Verifica se a leitura (READ TABLE) funcionou
+  "-----------------------------------------------------
+  IF sy-subrc <> 0.
+    MESSAGE 'Selecione um produto.' TYPE 'E'.
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 4. Limpa a estrutura do carrinho de compras
+  "-----------------------------------------------------
+  CLEAR gs_carrinho. "-> evita lixo de dados antigos
+
+  "-----------------------------------------------------
+  " 5. Transforma um produto em um item de pedido de compra
+  "-----------------------------------------------------
+  gs_carrinho-nome       = ls_produto-nome.
+  gs_carrinho-preco      = ls_produto-preco.
+  gs_carrinho-quantidade = p_qtd. "?
+
+  "-----------------------------------------------------
+  " 6. Calcula o total do item
+  "-----------------------------------------------------
+  gs_carrinho-total_item = gs_carrinho-quantidade * gs_carrinho-preco.
+
+  "-----------------------------------------------------
+  " 7. Adiciona ao carrinho
+  "-----------------------------------------------------
+  APPEND gs_carrinho TO gt_carrinho.
+
+  "-----------------------------------------------------
+  " 8. Atualiza o orçamento total do pedido de compras
+  "-----------------------------------------------------
+  PERFORM calcular_total.
+
+ENDFORM.
+
+FORM calcular_total.
+  "-----------------------------------------------------
+  " 1. O total começa zerado
+  "-----------------------------------------------------
+  gv_total = 0.
+
+  "-----------------------------------------------------
+  " 2. Percorre todo o carrinho de compras para calcular o total
+  "-----------------------------------------------------
+  LOOP AT gt_carrinho INTO gs_carrinho.
+    gv_total = gv_total + gs_carrinho-total_item.
+  ENDLOOP.
+
+ENDFORM.
+
+FORM confirmar_compra.
+
+  "Obs.: não precisa calcular_total porque esse valor
+  " já foi calculado ao adicionar produto no carrinho (on_double_click),
+  " ao editar a quantidade de produto no carrinho (on_data_changed [editar] e on_data_changed_finished [fim da edição]) e
+  " ao excluir produto do carrinho de compras,
+  " então já temos o valor do gv_total pronto.
+
+  "-----------------------------------------------------
+  " 1. Pega o valor do saldo diretamente do banco de dados
+  "-----------------------------------------------------
+  PERFORM obter_saldo.
+
+  "-----------------------------------------------------
+  " 2. Verifica se tem saldo suficiente para pagar pelo pedido de compras
+  "-----------------------------------------------------
+  IF gv_total > gv_saldo.
+    MESSAGE 'Saldo insuficiente para essa compra. Ajuste o pedido.' TYPE 'E'.
+    RETURN. "Permite ao usuário voltar a acessar o pedido de compras de onde parou
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 3. Atualiza o estoque após a finalização das compras
+  "-----------------------------------------------------
+  LOOP AT gt_carrinho INTO gs_carrinho.
+
+    UPDATE z35produtos_est
+    SET quantidade = quantidade + gs_carrinho-quantidade
+    WHERE nome = gs_carrinho-nome.
+
+    "-----------------------------------------------------
+    " 4. Verifica se deu tudo certo ao atualizar os estoques
+    "-----------------------------------------------------
+    IF sy-subrc <> 0.
+      MESSAGE |Erro ao atualizar produto { gs_carrinho-nome }| TYPE 'E'.
+    ENDIF.
+
+  ENDLOOP.
+
+  "-----------------------------------------------------
+  " 5. Atualiza o saldo no banco de dados
+  "-----------------------------------------------------
+  gv_saldo = gv_saldo - gv_total.
+
+  UPDATE z34recursos_fin
+    SET saldo = gv_saldo
+    WHERE id_fin = 1.
+
+  COMMIT WORK.
+
+  "-----------------------------------------------------
+  " 6. Atualiza o saldo na tela
+  "-----------------------------------------------------
+  v_saldo = gv_saldo.
+
+  MESSAGE 'Compra realizada com sucesso!' TYPE 'S'.
+
+  CLEAR gt_carrinho.
+
+ENDFORM.
+
+FORM confirmar_venda.
+
+  "Obs.: não precisa calcular_total porque esse valor
+  " já foi calculado ao adicionar produto no carrinho (on_double_click),
+  " ao editar a quantidade de produto no carrinho (on_data_changed [editar] e on_data_changed_finished [fim da edição]) e
+  " ao excluir produto do carrinho de compras,
+  " então já temos o valor do gv_total pronto.
+
+  "-----------------------------------------------------
+  " 1. Pega o valor do saldo diretamente do banco de dados
+  "-----------------------------------------------------
+  PERFORM obter_saldo.
+
+  "-----------------------------------------------------
+  " 2. Verifica se tem saldo suficiente para pagar pelo pedido de compras
+  "-----------------------------------------------------
+  IF gv_total > gv_saldo.
+    MESSAGE 'Saldo insuficiente para essa compra. Ajuste o pedido.' TYPE 'E'.
+    RETURN. "Permite ao usuário voltar a acessar o pedido de compras de onde parou
+  ENDIF.
+
+  "-----------------------------------------------------
+  " 3. Atualiza o estoque após a finalização das compras
+  "-----------------------------------------------------
+  LOOP AT gt_carrinho INTO gs_carrinho.
+
+    UPDATE z35produtos_est
+    SET quantidade = quantidade + gs_carrinho-quantidade
+    WHERE nome = gs_carrinho-nome.
+
+    "-----------------------------------------------------
+    " 4. Verifica se deu tudo certo ao atualizar os estoques
+    "-----------------------------------------------------
+    IF sy-subrc <> 0.
+      MESSAGE |Erro ao atualizar produto { gs_carrinho-nome }| TYPE 'E'.
+    ENDIF.
+
+  ENDLOOP.
+
+  "-----------------------------------------------------
+  " 5. Atualiza o saldo no banco de dados
+  "-----------------------------------------------------
+  gv_saldo = gv_saldo - gv_total.
+
+  UPDATE z34recursos_fin
+    SET saldo = gv_saldo
+    WHERE id_fin = 1.
+
+  COMMIT WORK.
+
+  "-----------------------------------------------------
+  " 6. Atualiza o saldo na tela
+  "-----------------------------------------------------
+  "PERFORM atualizar_saldo_na_tela.
+  " |-> não precisa ir ao banco de dados (SELECT no FORM),
+  " basta atualizar o campo na tela com o valor que está na variável
+
+  v_saldo = gv_saldo.
+
+  MESSAGE 'Compra realizada com sucesso!' TYPE 'S'.
+
+  CLEAR gt_carrinho.
+
+ENDFORM.
+
+FORM pedido_compra.
+
+  "-----------------------------------------------------
+  " 1. Informa à variável de controle que é uma operação de Compra
+  "-----------------------------------------------------
+  gv_tipo_operacao = 'C'.
+
+  "-----------------------------------------------------
+  " 2. Declaração de variáveis locais
+  "-----------------------------------------------------
+  DATA: " Elementos visuais da tela:
+    lo_splitter      TYPE REF TO cl_gui_splitter_container, " divide as ALVs
+    lo_cont_prod     TYPE REF TO cl_gui_container,          " container da esquerda (onde fica o ALV de produtos do fornecedor)
+    lo_cont_carr     TYPE REF TO cl_gui_container,          " container da direita (onde fica o ALV do carrinho de compras)
+    " ALVs - tabelas visuais
+    lo_alv_prod      TYPE REF TO cl_gui_alv_grid,
+    lo_alv_carr      TYPE REF TO cl_gui_alv_grid,
+    " Field Catalogs - como as colunas são definidas
+    lt_fieldcat_prod TYPE lvc_t_fcat,                       " Field Catalog de produtos do fornecedor
+    lt_fieldcat_carr TYPE lvc_t_fcat.                       " Field Catalog de produtos do carrinho de compras
+
+  "-----------------------------------------------------
+  " 3. Criar popup
+  "-----------------------------------------------------
+  PERFORM criar_popup.
+  PERFORM atualizar_caption_popup.
+
+  "-----------------------------------------------------
+  " 4. Para poder fechar o popup ao clicar no X
+  "-----------------------------------------------------
+
+  IF go_handler IS NOT BOUND. "se o objeto não existe
+    CREATE OBJECT go_handler. "cria
+  ENDIF.
+  SET HANDLER go_handler->on_close FOR go_popup. "usa o objeto
+
+  "-----------------------------------------------------
+  " 5. Splitter (2 áreas)
+  "-----------------------------------------------------
+  PERFORM criar_splitter CHANGING lo_cont_prod lo_cont_carr.
+
+  "-----------------------------------------------------
+  " 6. Criar ALVs
+  "-----------------------------------------------------
+  PERFORM    criar_alvs
+    USING    lo_cont_prod lo_cont_carr
+    CHANGING lo_alv_prod  lo_alv_carr.
+
+  "-----------------------------------------------------
+  " 7. Carregar produtos do fornecedor
+  "-----------------------------------------------------
+  PERFORM carregar_produtos.
+
+  "-----------------------------------------------------
+  " 8. Criar o Field Catalog dos produtos do fornecedor
+  "-----------------------------------------------------
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text = 'Produto'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_prod ).
+
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text = 'Preço'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_prod ).
+
+  "-----------------------------------------------------
+  " 9. Criar o Field Catalog do carrinho de compras
+  "-----------------------------------------------------
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text = 'Produto'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'QUANTIDADE'
+      p_text = 'Quantidade'
+      p_edit = abap_true
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text = 'Preço'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'TOTAL_ITEM'
+      p_text = 'Total'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+
+  "-----------------------------------------------------
+  " 10. Mostrar ALV dos produtos do fornecedor
+  "-----------------------------------------------------
+  PERFORM exibir_alv USING lo_alv_prod gt_produtos lt_fieldcat_prod.
+
+  "-----------------------------------------------------
+  " 11. Mostrar ALV dos produtos do carrinho de compras
+  "-----------------------------------------------------
+  PERFORM exibir_alv USING lo_alv_carr gt_carrinho lt_fieldcat_carr.
+
+  "-----------------------------------------------------
+  " 12. Registrar eventos
+  "-----------------------------------------------------
+  PERFORM registrar_eventos USING lo_alv_prod lo_alv_carr.
+
+ENDFORM.
+
+FORM pedido_venda.
+  "-----------------------------------------------------
+  " 1. Informa à variável de controle que é uma operação de Venda
+  "-----------------------------------------------------
+  gv_tipo_operacao = 'V'.
+
+  "-----------------------------------------------------
+  " 2. Declaração de variáveis locais
+  "-----------------------------------------------------
+  DATA: " Elementos visuais da tela:
+    lo_splitter      TYPE REF TO cl_gui_splitter_container, " divide as ALVs
+    lo_cont_prod     TYPE REF TO cl_gui_container,          " container da esquerda (onde fica o ALV de produtos do fornecedor)
+    lo_cont_carr     TYPE REF TO cl_gui_container,          " container da direita (onde fica o ALV do carrinho de compras)
+    " ALVs - tabelas visuais
+    lo_alv_prod      TYPE REF TO cl_gui_alv_grid,
+    lo_alv_carr      TYPE REF TO cl_gui_alv_grid,
+    " Field Catalogs - como as colunas são definidas
+    lt_fieldcat_prod TYPE lvc_t_fcat,                       " Field Catalog de produtos do fornecedor
+    lt_fieldcat_carr TYPE lvc_t_fcat.                       " Field Catalog de produtos do carrinho de compras
+
+  "-----------------------------------------------------
+  " 3. Criar popup
+  "-----------------------------------------------------
+  PERFORM criar_popup.
+  PERFORM atualizar_caption_popup.
+
+  "-----------------------------------------------------
+  " 4. Para poder fechar o popup ao clicar no X
+  "-----------------------------------------------------
+  IF go_handler IS NOT BOUND. "se o objeto não existe
+    CREATE OBJECT go_handler. "cria
+  ENDIF.
+  SET HANDLER go_handler->on_close FOR go_popup. "usa o objeto
+
+  "-----------------------------------------------------
+  " 5. Splitter (2 áreas)
+  "-----------------------------------------------------
+  PERFORM criar_splitter CHANGING lo_cont_prod lo_cont_carr.
+
+  "-----------------------------------------------------
+  " 6. Criar ALVs
+  "-----------------------------------------------------
+  PERFORM    criar_alvs
+    USING    lo_cont_prod lo_cont_carr
+    CHANGING lo_alv_prod  lo_alv_carr.
+
+  "-----------------------------------------------------
+  " 7. Carregar produtos da loja
+  "-----------------------------------------------------
+  PERFORM carregar_produtos.
+
+  "-----------------------------------------------------
+  " 8. Criar o Field Catalog dos produtos da loja
+  "-----------------------------------------------------
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text = 'Produto'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_prod ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text = 'Preço'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_prod ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'QUANTIDADE'
+      p_text = 'Estoque'
+      p_edit = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_prod ).
+
+  "-----------------------------------------------------
+  " 9. Criar o Field Catalog do carrinho de compras
+  "-----------------------------------------------------
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'NOME'
+      p_text  = 'Produto'
+      p_edit   = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'QUANTIDADE'
+      p_text  = 'Quantidade'
+      p_edit  = abap_true
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'PRECO'
+      p_text  = 'Preço'
+      p_edit  = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+  zcl_alv_helper=>adicionar_field_catalog(
+    EXPORTING
+      p_field = 'TOTAL_ITEM'
+      p_text  = 'Total'
+      p_edit  = space
+    CHANGING
+      pt_fieldcat = lt_fieldcat_carr ).
+
+  "-----------------------------------------------------
+  " 10. Mostrar ALV dos produtos do fornecedor
+  "-----------------------------------------------------
+  PERFORM exibir_alv USING lo_alv_prod gt_produtos lt_fieldcat_prod.
+
+  "-----------------------------------------------------
+  " 11. Mostrar ALV dos produtos do carrinho de compras
+  "-----------------------------------------------------
+  PERFORM exibir_alv USING lo_alv_carr gt_carrinho lt_fieldcat_carr.
+
+  "-----------------------------------------------------
+  " 12. Registrar eventos
+  "-----------------------------------------------------
+  PERFORM registrar_eventos USING lo_alv_prod lo_alv_carr.
+
+ENDFORM.
+
+FORM atualizar_caption_popup.
+
+  DATA lv_caption TYPE c LENGTH 100.
+
+  IF gv_tipo_operacao = 'C'.
+    lv_caption = |Pedido de compra - Total: { gv_total }|.
+  ELSEIF gv_tipo_operacao = 'V'.
+    lv_caption = |Pedido de venda - Total: { gv_total }|.
+  ENDIF.
+
+  IF go_popup IS BOUND. "se a janela popup estiver aberta (pra não dar DUMP)
+    go_popup->set_caption( "vá até o método set_caption do objeto go_popup
+      EXPORTING
+        caption = lv_caption "envia o texto para o método
+    ).
+  ENDIF.
+
+ENDFORM.
+
+FORM criar_popup.
+
+  CREATE OBJECT go_popup
+    EXPORTING
+      width  = 1000
+      height = 250
+      top    = 50
+      left   = 80.
+
+  "para garantir que o objeto handler existe
+  IF go_handler IS NOT BOUND. "se não existir
+    CREATE OBJECT go_handler. "cria
+  ENDIF.
+  SET HANDLER go_handler->on_close FOR go_popup. "usa o método do objeto handler
+
+ENDFORM.
+
+FORM criar_splitter
+  " Divide a janela popup em 2 containers:
+  "   . Esquerdo: lista de produtos
+  "   . Direito:  carrinho de compras
+  CHANGING co_cont_prod TYPE REF TO cl_gui_container
+           co_cont_carr TYPE REF TO cl_gui_container.
+
+  DATA lo_splitter TYPE REF TO cl_gui_splitter_container.
+
+  CREATE OBJECT lo_splitter
+    EXPORTING
+      parent  = go_popup
+      rows    = 1
+      columns = 2.
+
+  co_cont_prod = lo_splitter->get_container( row = 1 column = 1 ).
+  co_cont_carr = lo_splitter->get_container( row = 1 column = 2 ).
+
+ENDFORM.
+
+FORM criar_alvs
+  USING    io_cont_prod TYPE REF TO cl_gui_container
+           io_cont_carr TYPE REF TO cl_gui_container
+  CHANGING co_alv_prod  TYPE REF TO cl_gui_alv_grid
+           co_alv_carr  TYPE REF TO cl_gui_alv_grid.
+
+  CREATE OBJECT co_alv_prod
+    EXPORTING
+      i_parent = io_cont_prod.
+
+  CREATE OBJECT co_alv_carr
+    EXPORTING
+      i_parent = io_cont_carr.
+
+  " guarda referência global
+  go_alv_carr = co_alv_carr.
+
+  "registra edição
+  co_alv_carr->register_edit_event(
+    EXPORTING i_event_id = cl_gui_alv_grid=>mc_evt_modified ).
+
+ENDFORM.
+
+FORM carregar_produtos.
+
+  CLEAR gt_produtos.
+
+  SELECT nome, preco, quantidade
+    INTO CORRESPONDING FIELDS OF TABLE @gt_produtos
+    FROM z35produtos_est.
+
+  SORT gt_produtos BY nome.
+
+ENDFORM.
+
+FORM exibir_alv
+  USING io_alv      TYPE REF TO cl_gui_alv_grid
+        it_outtab   TYPE STANDARD TABLE
+        it_fieldcat TYPE lvc_t_fcat.
+
+  DATA ls_layout TYPE lvc_s_layo.
+
+  io_alv->set_table_for_first_display(
+    EXPORTING is_layout = ls_layout
+    CHANGING
+      it_outtab       = it_outtab
+      it_fieldcatalog = it_fieldcat ).
+
+ENDFORM.
+
+FORM registrar_eventos
+  USING io_alv_prod TYPE REF TO cl_gui_alv_grid
+        io_alv_carr TYPE REF TO cl_gui_alv_grid.
+
+  DATA lo_event TYPE REF TO lcl_alv_event.
+  CREATE OBJECT lo_event.
+
+  SET HANDLER lo_event->on_double_click          FOR io_alv_prod. "adicionar item de compra ao carrinho
+  SET HANDLER lo_event->on_data_changed          FOR io_alv_carr. "edição possível de quantidade de itens
+  SET HANDLER lo_event->on_data_changed_finished FOR io_alv_carr. "atualiza dados com base na quantidade de itens alterada
+  SET HANDLER lo_event->on_toolbar               FOR io_alv_carr. "botão de confirmação existe na ALV
+  SET HANDLER lo_event->on_user_command          FOR io_alv_carr. "botão de confirmação funciona na ALV
+
+ENDFORM.
